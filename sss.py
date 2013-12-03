@@ -1,5 +1,4 @@
 # Simple server for SSS
-
 import uuid
 
 BLK_SIZE = 1024
