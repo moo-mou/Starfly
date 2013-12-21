@@ -1,15 +1,24 @@
 # Simple server for SSS
-import uuid
+import sys, os, tempfile, subprocess, socket
 
 BLK_SIZE = 1024
 
+if sys.platform == "darwin": # mac
+    CMD = ["screencapture", '-x']
+elif sys.platform.find("win") >= 0: # window
+    CMD = [os.getcwd() + "/win32/bin/Minicap.exe", 
+        "-capturedesktop", "-closeapp", "-exit", "-save"]
+else:
+    print "Sorry, only OS X and Windows are supported."
+    exit()
+
 def captureScreen():
-    import subprocess
-    filename = uuid.uuid4()
-    retcode = subprocess.call(["screencapture", "/tmp/"+str(filename)])
+    f = tempfile.NamedTemporaryFile(delete = False)
+    cmd = CMD[:] + [f.name]
+    retcode = subprocess.call(cmd)
 
     if retcode == 0:
-        return "/tmp/" + str(filename)
+        return f.name
     else:
         return None
 
@@ -22,30 +31,31 @@ def convert_to_bytes(no):
     return result
 
 def mainServer():
-    import socket, sys, os
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("localhost", 9999))
+    s.bind(("", 9999))
     s.listen(1)
 
     while True:
         conn, addr = s.accept()
-
         print "Connection received:", conn, addr
 
         filepath = captureScreen()
         filesize = os.path.getsize(filepath)
 
-        conn.send(convert_to_bytes(filesize))
-        print "Filesize:", filesize
+        try:
+            conn.send(convert_to_bytes(filesize))
+            print "Filesize:", filesize
 
-        sent = 0
-        with open(filepath, 'rb') as f:
-            packet = f.read(BLK_SIZE)
-            sent += len(packet)
-            while packet: 
-                conn.send(packet)
+            sent = 0
+            with open(filepath, 'rb') as f:
                 packet = f.read(BLK_SIZE)
                 sent += len(packet)
-            print "finished sending:", sent
+                while packet: 
+                    conn.send(packet)
+                    packet = f.read(BLK_SIZE)
+                    sent += len(packet)
+                print "finished sending:", sent
+        except socket.error, e:
+            print "Pipe error:", socket.error
 
 mainServer()
