@@ -2,6 +2,8 @@
 import sys, os, tempfile, subprocess, socket
 
 BLK_SIZE = 1024
+CMD_PING = 0
+CMD_SNAP = 1
 
 if sys.platform == "darwin": # mac
     CMD = ["screencapture", '-x']
