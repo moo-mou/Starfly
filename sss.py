@@ -1,6 +1,6 @@
 # Simple server for SSS
-import sys, os, tempfile, subprocess, socket
-import struct
+import sys, os, tempfile, subprocess, socket, struct, time
+from threading import Thread
 
 BLK_SIZE = 1024
 
@@ -8,14 +8,8 @@ CMD_PING = 1
 CMD_CALIBRATE = 2
 CMD_SNAP = 3
 
-if sys.platform == "darwin": # mac
-    CMD = ["screencapture", '-x']
-elif sys.platform.find("win") >= 0: # window
-    CMD = [os.getcwd() + "/win32/bin/Minicap.exe",
-        "-capturedesktop", "-closeapp", "-exit", "-save"]
-else:
-    print "Sorry, only OS X and Windows are supported."
-    exit()
+globalThreadInst = None
+globalCapturedScreens = [(None, None) for x in range(1)]
 
 def captureScreen():
     f = tempfile.NamedTemporaryFile(delete = False)
@@ -26,6 +20,32 @@ def captureScreen():
         return f.name
     else:
         return None
+
+def timedCapture(latency):
+    print "Thread started with latency:", latency
+    while True:
+        time.sleep(latency / 1000000000.0)
+
+        filepath = captureScreen()
+        filesize = os.path.getsize(filepath)
+
+        ringInd = len(globalCapturedScreens) % len(globalCapturedScreens)
+        existingFile, _ = globalCapturedScreens[ringInd]
+
+        if existingFile:
+            os.remove(existingFile)
+
+        print "KACHING"
+        globalCapturedScreens[ringInd] = (filepath, filesize)
+
+if sys.platform == "darwin": # mac
+    CMD = ["screencapture", '-x']
+elif sys.platform.find("win") >= 0: # window
+    CMD = [os.getcwd() + "/win32/bin/Minicap.exe",
+        "-capturedesktop", "-closeapp", "-exit", "-save"]
+else:
+    print "Sorry, only OS X and Windows are supported."
+    exit()
 
 def convert_to_bytes(no):
     result = bytearray()
@@ -48,6 +68,7 @@ def receiveXByte(x, conn):
     return intValue
 
 def mainServer():
+    global globalThreadInst, globalCapturedScreens
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("", 9999))
     s.listen(1)
@@ -77,27 +98,31 @@ def mainServer():
             latency = receiveXByte(4, conn)
             print "Latency (ns): ", latency
             conn.close()
+
+            if not globalThreadInst:
+                globalThreadInst = Thread(target = timedCapture, args = (latency,))
+                globalThreadInst.run()
+                print "Started thread"
+
             continue
         elif cmd == CMD_SNAP:
-            pass
+            # Always get the 1st for now
+            filepath, filesize = globalCapturedScreens[0]
 
-        filepath = captureScreen()
-        filesize = os.path.getsize(filepath)
+            try:
+                conn.send(convert_to_bytes(filesize))
+                print "Filesize:", filesize
 
-        try:
-            conn.send(convert_to_bytes(filesize))
-            print "Filesize:", filesize
-
-            sent = 0
-            with open(filepath, 'rb') as f:
-                packet = f.read(BLK_SIZE)
-                sent += len(packet)
-                while packet:
-                    conn.send(packet)
+                sent = 0
+                with open(filepath, 'rb') as f:
                     packet = f.read(BLK_SIZE)
                     sent += len(packet)
-                print "finished sending:", sent
-        except socket.error, e:
-            print "Pipe error:", socket.error
+                    while packet:
+                        conn.send(packet)
+                        packet = f.read(BLK_SIZE)
+                        sent += len(packet)
+                    print "finished sending:", sent
+            except socket.error, e:
+                print "Pipe error:", socket.error
 
 mainServer()
