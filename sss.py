@@ -1,6 +1,7 @@
 # Simple server for SSS
 import sys, os, tempfile, subprocess, socket, struct, time
-from threading import Thread
+import shutil
+from multiprocessing import Process, Lock, Value
 
 BLK_SIZE = 1024
 
@@ -8,44 +9,54 @@ CMD_PING = 1
 CMD_CALIBRATE = 2
 CMD_SNAP = 3
 
-globalThreadInst = None
-globalCapturedScreens = [(None, None) for x in range(1)]
+WINDOW_SIZE = 5
 
-def captureScreen():
-    f = tempfile.NamedTemporaryFile(delete = False)
-    cmd = CMD[:] + [f.name]
-    retcode = subprocess.call(cmd)
+globalCaptureInst = None
+globalCapturedScreens = [tempfile.NamedTemporaryFile(delete = False) for x in range(5)]
 
-    if retcode == 0:
-        return f.name
-    else:
-        return None
+class CaptureProcess(Process):
+    def __init__(self, captureCmd, latency, sharedFiles, lock, extStart, extEnd):
+        super(CaptureProcess, self).__init__()
 
-def timedCapture(latency):
-    print "Thread started with latency:", latency
-    while True:
-        time.sleep(latency / 1000000000.0)
+        self.captureCmd = captureCmd
+        self.latency = latency
+        self.globalScreens = sharedFiles[:]
+        self.lock = lock
+        self.extStart = extStart
+        self.extEnd = extEnd
 
-        filepath = captureScreen()
-        filesize = os.path.getsize(filepath)
+        self.window = [0, 0]
+        self.windowInd = 0
 
-        ringInd = len(globalCapturedScreens) % len(globalCapturedScreens)
-        existingFile, _ = globalCapturedScreens[ringInd]
+    def captureScreen(self, captureCmd):
+        start, end = self.window
 
-        if existingFile:
-            os.remove(existingFile)
+        if start == end: # special case - starting condition
+            f = self.globalScreens[start]
+            self.extStart.value = start
+        else:
+            f = self.globalScreens[end]
+            self.extStart.value = end
 
-        print "KACHING"
-        globalCapturedScreens[ringInd] = (filepath, filesize)
+        cmd = captureCmd[:] + [f.name]
+        retcode = subprocess.call(cmd)
 
-if sys.platform == "darwin": # mac
-    CMD = ["screencapture", '-x']
-elif sys.platform.find("win") >= 0: # window
-    CMD = [os.getcwd() + "/win32/bin/Minicap.exe",
-        "-capturedesktop", "-closeapp", "-exit", "-save"]
-else:
-    print "Sorry, only OS X and Windows are supported."
-    exit()
+        if retcode == 0: # Success
+            self.window[1] = (end + 1) % len(self.globalScreens)
+            if start == self.window[1]:
+                self.window[0] = (start + 1) % len(self.globalScreens)
+                self.extStart.value = self.window[0]
+            return f.name
+        else:
+            return None
+
+    def run(self):
+        while True:
+            time.sleep(self.latency / 1000000000.0)
+
+            self.lock.acquire()
+            filepath = self.captureScreen(self.captureCmd)
+            self.lock.release()
 
 def convert_to_bytes(no):
     result = bytearray()
@@ -67,8 +78,11 @@ def receiveXByte(x, conn):
     intValue = struct.unpack('>Q', data)[0]
     return intValue
 
-def mainServer():
-    global globalThreadInst, globalCapturedScreens
+def mainServer(captureCmd):
+    fileAccessLock = Lock()
+    startInd = Value('i', 0)
+    endInd = Value('i', 0)
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("", 9999))
     s.listen(1)
@@ -99,15 +113,30 @@ def mainServer():
             print "Latency (ns): ", latency
             conn.close()
 
-            if not globalThreadInst:
-                globalThreadInst = Thread(target = timedCapture, args = (latency,))
-                globalThreadInst.run()
-                print "Started thread"
-
+            global globalCaptureInst, globalCapturedScreens
+            if not globalCaptureInst:
+                globalCaptureInst = CaptureProcess(captureCmd,
+                        latency,
+                        globalCapturedScreens,
+                        fileAccessLock,
+                        startInd,
+                        endInd)
+                globalCaptureInst.start()
+                print "Started Process"
             continue
+
         elif cmd == CMD_SNAP:
-            # Always get the 1st for now
-            filepath, filesize = globalCapturedScreens[0]
+
+            fileAccessLock.acquire()
+
+            srcFile = globalCapturedScreens[startInd.value]
+            dstFile = tempfile.NamedTemporaryFile(delete = False)
+            shutil.copyfile(srcFile.name, dstFile.name)
+
+            fileAccessLock.release()
+
+            filepath = dstFile.name
+            filesize = os.path.getsize(dstFile.name)
 
             try:
                 conn.send(convert_to_bytes(filesize))
@@ -124,5 +153,18 @@ def mainServer():
                     print "finished sending:", sent
             except socket.error, e:
                 print "Pipe error:", socket.error
+                os.remove(filepath)
+            os.remove(filepath)
 
-mainServer()
+# Initialization Code
+if __name__ == "__main__":
+    if sys.platform == "darwin": # mac
+        captureCmd = ["screencapture", '-x']
+    elif sys.platform.find("win") >= 0: # window
+        captureCmd = [os.getcwd() + "/win32/bin/Minicap.exe",
+            "-capturedesktop", "-closeapp", "-exit", "-save"]
+    else:
+        print "Sorry, only OS X and Windows are supported."
+        exit()
+
+    mainServer(captureCmd)
